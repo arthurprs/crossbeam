@@ -42,6 +42,7 @@ pub use self::PopResult::*;
 
 use std::fmt;
 use std::ptr;
+use std::mem;
 use std::cell::UnsafeCell;
 
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -71,6 +72,7 @@ struct Node<T> {
 /// popper at a time (many pushers are allowed).
 pub struct Queue<T> {
     head: AtomicPtr<Node<T>>,
+    pad0: [u8; 48],
     tail: UnsafeCell<*mut Node<T>>,
 }
 
@@ -99,6 +101,7 @@ impl<T> Queue<T> {
         let stub = unsafe { Node::new(None) };
         Queue {
             head: AtomicPtr::new(stub),
+            pad0: unsafe { mem::uninitialized()},
             tail: UnsafeCell::new(stub),
         }
     }

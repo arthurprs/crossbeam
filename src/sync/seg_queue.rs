@@ -13,16 +13,19 @@ const SEG_SIZE: usize = 32;
 /// for efficiency.
 ///
 /// Usable with any number of producers and consumers.
-#[derive(Debug)]
 pub struct SegQueue<T> {
     head: Atomic<Segment<T>>,
+    pad0: [u8; 48],
     tail: Atomic<Segment<T>>,
 }
 
 struct Segment<T> {
     low: AtomicUsize,
+    pad0: [u8; 48],
     data: [UnsafeCell<(T, AtomicBool)>; SEG_SIZE],
+    pad1: [u8; 48],
     high: AtomicUsize,
+    pad2: [u8; 48],
     next: Atomic<Segment<T>>,
 }
 
@@ -37,6 +40,9 @@ unsafe impl<T: Send> Sync for Segment<T> {}
 impl<T> Segment<T> {
     fn new() -> Segment<T> {
         let rqueue = Segment {
+            pad0: unsafe { mem::uninitialized() },
+            pad1: unsafe { mem::uninitialized() },
+            pad2: unsafe { mem::uninitialized() },
             data: unsafe { mem::uninitialized() },
             low: AtomicUsize::new(0),
             high: AtomicUsize::new(0),
@@ -55,6 +61,7 @@ impl<T> SegQueue<T> {
     /// Create a new, empty queue.
     pub fn new() -> SegQueue<T> {
         let q = SegQueue {
+            pad0: unsafe { mem::uninitialized() },
             head: Atomic::null(),
             tail: Atomic::null(),
         };
@@ -69,19 +76,19 @@ impl<T> SegQueue<T> {
     pub fn push(&self, t: T) {
         let guard = epoch::pin();
         loop {
-            let tail = self.tail.load(Acquire, &guard).unwrap();
+            let tail = unsafe { self.tail.load(Acquire, &guard).unchecked_unwrap() };
             if tail.high.load(Relaxed) >= SEG_SIZE { continue }
             let i = tail.high.fetch_add(1, Relaxed);
             unsafe {
                 if i < SEG_SIZE {
-                    let cell = (*tail).data.get_unchecked(i).get();
-                    ptr::write(&mut (*cell).0, t);
-                    (*cell).1.store(true, Release);
-
                     if i + 1 == SEG_SIZE {
                         let tail = tail.next.store_and_ref(Owned::new(Segment::new()), Release, &guard);
                         self.tail.store_shared(Some(tail), Release);
                     }
+
+                    let cell = (*tail).data.get_unchecked(i).get();
+                    ptr::write(&mut (*cell).0, t);
+                    (*cell).1.store(true, Release);
 
                     return
                 }
@@ -95,7 +102,7 @@ impl<T> SegQueue<T> {
     pub fn try_pop(&self) -> Option<T> {
         let guard = epoch::pin();
         loop {
-            let head = self.head.load(Acquire, &guard).unwrap();
+            let head = unsafe { self.head.load(Acquire, &guard).unchecked_unwrap() };
             loop {
                 let low = head.low.load(Relaxed);
                 if low >= cmp::min(head.high.load(Relaxed), SEG_SIZE) { break }
@@ -122,6 +129,26 @@ impl<T> SegQueue<T> {
         }
     }
 }
+
+
+// Option::unchecked_unwrap
+trait UncheckedOptionExt<T> {
+    unsafe fn unchecked_unwrap(self) -> T;
+}
+#[inline]
+unsafe fn unreachable() -> ! {
+    enum Void {}
+    match *(1 as *const Void) {}
+}
+impl<T> UncheckedOptionExt<T> for Option<T> {
+    unsafe fn unchecked_unwrap(self) -> T {
+        match self {
+            Some(x) => x,
+            None => unreachable(),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod test {

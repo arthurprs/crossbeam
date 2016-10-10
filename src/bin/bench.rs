@@ -8,13 +8,16 @@ use std::time::Duration;
 use crossbeam::scope;
 use crossbeam::sync::MsQueue;
 use crossbeam::sync::SegQueue;
+use crossbeam::sync::SegQueue0;
 
 use extra_impls::mpsc_queue::Queue as MpscQueue;
+use extra_impls::mpmc_bounded_queue::Queue as MpmcQueue;
+use extra_impls::mpmc_bounded_queue0::Queue as MpmcQueue0;
 
 mod extra_impls;
 
-const COUNT: u64 = 10000000;
-const THREADS: u64 = 2;
+const COUNT: u64 = 30000000;
+const THREADS: u64 = 1;
 
 #[cfg(feature = "nightly")]
 fn time<F: FnOnce()>(f: F) -> Duration {
@@ -47,6 +50,21 @@ impl<T> Queue<T> for SegQueue<T> {
     fn try_pop(&self) -> Option<T> { self.try_pop() }
 }
 
+impl<T> Queue<T> for SegQueue0<T> {
+    fn push(&self, t: T) { self.push(t) }
+    fn try_pop(&self) -> Option<T> { self.try_pop() }
+}
+
+impl<T: Send> Queue<T> for MpmcQueue<T> {
+    fn push(&self, t: T) { assert!(self.push(t).is_ok()) }
+    fn try_pop(&self) -> Option<T> { self.pop() }
+}
+
+impl<T: Send> Queue<T> for MpmcQueue0<T> {
+    fn push(&self, t: T) { assert!(self.push(t).is_ok()) }
+    fn try_pop(&self) -> Option<T> { self.pop() }
+}
+
 impl<T> Queue<T> for MpscQueue<T> {
     fn push(&self, t: T) { self.push(t) }
     fn try_pop(&self) -> Option<T> {
@@ -67,19 +85,27 @@ impl<T> Queue<T> for Mutex<VecDeque<T>> {
     fn try_pop(&self) -> Option<T> { self.lock().unwrap().pop_front() }
 }
 
-fn bench_queue_mpsc<Q: Queue<u64> + Sync>(q: Q) -> f64 {
+fn bench_queue_mpsc<Q: Queue<(u64, u64)> + Sync>(q: Q) -> f64 {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering::Relaxed;
+    let start = AtomicBool::new(false);
+
     let d = time(|| {
         scope(|scope| {
             for _i in 0..THREADS {
-                let qr = &q;
-                scope.spawn(move || {
+                scope.spawn(|| {
+                    let s = &start;
+                    let qr = &q;
+                    while !s.load(Relaxed) {}
                     for x in 0..COUNT {
-                        let _ = qr.push(x);
+                        let _ = qr.push(Default::default());
                     }
                 });
             }
 
             let mut count = 0;
+            let s = &start;
+            s.store(true, Relaxed);
             while count < COUNT*THREADS {
                 if q.try_pop().is_some() {
                     count += 1;
@@ -151,15 +177,19 @@ fn bench_chan_mpsc() -> f64 {
 }
 
 fn main() {
-    println!("MSQ mpsc: {}", bench_queue_mpsc(MsQueue::new()));
-    println!("chan mpsc: {}", bench_chan_mpsc());
-    println!("mpsc mpsc: {}", bench_queue_mpsc(MpscQueue::new()));
-    println!("Seg mpsc: {}", bench_queue_mpsc(SegQueue::new()));
+    loop {
+        // println!("chan mpsc: {}", bench_chan_mpsc());
+        // println!("MSQ mpsc: {}", bench_queue_mpsc(MsQueue::new()));
+        // println!("Seg mpsc: {}", bench_queue_mpsc(SegQueue::new()));
+        println!("mpsc mpsc: {}", bench_queue_mpsc(MpscQueue::new()));
+        // println!("Seg0 mpsc: {}", bench_queue_mpsc(SegQueue0::new()));
+        // println!("MpmcQueue mpsc: {}", bench_queue_mpsc(MpmcQueue::with_capacity(COUNT as usize)));
+        // println!("MpmcQueue0 mpsc: {}", bench_queue_mpsc(MpmcQueue0::with_capacity(COUNT as usize)));
+    }
 
     println!("MSQ mpmc: {}", bench_queue_mpmc(MsQueue::new()));
     println!("Seg mpmc: {}", bench_queue_mpmc(SegQueue::new()));
+    println!("queue_mpmc: {}", bench_queue_mpmc(SegQueue0::new()));
 
-//    println!("queue_mpsc: {}", bench_queue_mpsc());
-//    println!("queue_mpmc: {}", bench_queue_mpmc());
 //   println!("mutex_mpmc: {}", bench_mutex_mpmc());
 }
